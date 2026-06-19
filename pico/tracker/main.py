@@ -11,8 +11,8 @@ _ADV_TYPE_UUID16_COMPLETE = const(0x03)
 # 設備名稱
 name = "Pico-Tracker"
 
-# 16-bit UUID: 0x181A (Environmental Sensing, 僅為範例，或可用專案自訂的 UUID)
-uuid16 = 0x181A
+# 16-bit UUID: 0xFEED (Matches the host config target_uuid 0000FEED-...)
+uuid16 = 0xFEED
 
 # 建構廣播負載 (Advertising Payload)
 def build_advertising_payload(name, uuid16):

@@ -45,7 +45,7 @@ static void push_rssi(int rssi)
     spin_unlock_irqrestore(&buffer_lock, flags);
 }
 
-/* 從環形緩衝區讀取最新一筆 RSSI */
+/* 從環形緩衝區讀取最新一筆 RSSI，並清空 buffer */
 static int pop_latest_rssi(int *rssi)
 {
     unsigned long flags;
@@ -54,20 +54,20 @@ static int pop_latest_rssi(int *rssi)
     spin_lock_irqsave(&buffer_lock, flags);
     
     if (head == tail) {
-        /* Buffer is empty */
+        /* Buffer is empty: Pico 斷線或尚未收到資料 */
         ret = -1;
     } else {
-        /* 取出最新的一筆資料 (head 的前一筆) */
+        /* 取出最新的一筆資料 (head 的前一筆)，不消耗 buffer */
         int latest_idx = (head - 1 + BUFFER_SIZE) % BUFFER_SIZE;
         *rssi = rssi_buffer[latest_idx];
-        /* 為了簡單化，讀取後我們依然可以選擇清空，或只取最新。
-         * 在這個設計中，為了配合 ioctl 頻繁輪詢，我們直接讀取最新值但不移動 tail。
-         * 如果真的需要當成 queue，可以修改 tail。 */
+        /* 不移動 tail：讓 GUI 每次都能讀到最後一個寫入的值（含哨兵）。
+         * 斷線偵測由 User Space BLE thread 寫入特殊哨兵值 (-9999) 來實現。 */
     }
 
     spin_unlock_irqrestore(&buffer_lock, flags);
     return ret;
 }
+
 
 /* 模擬收到藍牙封包的 Timer Callback */
 static void sim_timer_callback(struct timer_list *timer)
@@ -92,9 +92,7 @@ static void sim_timer_callback(struct timer_list *timer)
 
 static int dev_open(struct inode *inodep, struct file *filep)
 {
-    if (device_open_count > 0) {
-        return -EBUSY;
-    }
+    // 移除 device_open_count 限制，允許多重開啟 (讀與寫併發)
     device_open_count++;
     return 0;
 }
@@ -158,17 +156,18 @@ static int __init pico_tracker_init(void)
     
     printk(KERN_INFO "PicoTracker: Registered correctly with major number %d\n", major_num);
     printk(KERN_INFO "PicoTracker: Please create a device file with: mknod /dev/%s c %d 0\n", DEVICE_NAME, major_num);
+    printk(KERN_INFO "PicoTracker: Loaded v2 (with sim_timer)\n");
 
-    /* 啟動模擬用的 Timer */
-    timer_setup(&sim_timer, sim_timer_callback, 0);
-    mod_timer(&sim_timer, jiffies + msecs_to_jiffies(100));
+    /* 啟動模擬用的 Timer (已註解，確保只接收真實藍牙資料) */
+    // timer_setup(&sim_timer, sim_timer_callback, 0);
+    // mod_timer(&sim_timer, jiffies + msecs_to_jiffies(100));
 
     return 0;
 }
 
 static void __exit pico_tracker_exit(void)
 {
-    del_timer_sync(&sim_timer);
+    timer_delete_sync(&sim_timer);
     unregister_chrdev(major_num, DEVICE_NAME);
     printk(KERN_INFO "PicoTracker: Unregistered the device\n");
 }

@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 from .config import TrackerSettings
 from .models import SignalReading
 from .processing import ExponentialSmoother, SignalHistory, clamp, estimate_distance
-from .sources import BleSignalSource, IoctlSignalSource, SignalSource, SimulatedSignalSource
+from .sources import BleSignalSource, IoctlSignalSource, SignalSource, SimulatedSignalSource, BeaconNotFoundError
 
 
 class TrackerController:
@@ -33,6 +33,11 @@ class TrackerController:
         try:
             rssi = self.source.read()
             self.last_status = f"{self.mode} mode"
+        except BeaconNotFoundError:
+            # Pico 斷線或找不到：重置 smoother，強制變為最遠狀態
+            self.smoother.reset()
+            rssi = -95
+            self.last_status = "⚠️ Pico 未連線（距離過遠）"
         except Exception as exc:
             if self.mode == "live":
                 self.source = self.fallback_source
@@ -112,10 +117,10 @@ class SignalDashboard(tk.Tk):
         self._metric_card(left, "最後更新", self.time_var, 3)
 
         status = ttk.Label(left, textvariable=self.status_var, style="Status.TLabel")
-        status.grid(row=4, column=0, columnspan=2, sticky="w", padx=16, pady=(8, 16))
+        status.grid(row=8, column=0, columnspan=2, sticky="w", padx=16, pady=(8, 16))
 
         self.bar_canvas = tk.Canvas(left, height=62, bg="#0f172a", highlightthickness=0)
-        self.bar_canvas.grid(row=5, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 16))
+        self.bar_canvas.grid(row=9, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 16))
         self.bar_canvas.bind("<Configure>", lambda _event: self._draw_signal_bar())
 
         trend_title = ttk.Label(right, text="RSSI 趨勢", style="Metric.TLabel")
@@ -192,6 +197,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argument_parser().parse_args()
     settings = TrackerSettings()
+    
+    # If running in LKM mode, start the background thread to automatically 
+    # scan for real Bluetooth data and push it into the Kernel Module.
+    if args.mode == "lkm":
+        from .sources import start_lkm_writer_thread
+        start_lkm_writer_thread(settings.target_uuid)
+        
     controller = TrackerController(settings, args.mode)
     app = SignalDashboard(controller)
     try:
