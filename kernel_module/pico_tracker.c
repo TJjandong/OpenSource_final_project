@@ -81,7 +81,7 @@ static char *target_mac = "";
 module_param(target_mac, charp, 0444);
 static int hci_dev_id = 0;
 module_param(hci_dev_id, int, 0444);
-static int disconnect_timeout_sec = 15;
+static int disconnect_timeout_sec = 3;
 module_param(disconnect_timeout_sec, int, 0644);
 
 static int major_num;

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -9,3 +9,4 @@ class SignalReading:
     rssi: int
     smoothed_rssi: float
     estimated_distance_m: float
+    connected: bool = True          # False → Pico 斷線哨兵觸發

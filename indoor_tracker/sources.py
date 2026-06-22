@@ -6,13 +6,20 @@ from __future__ import annotations
 
 import asyncio
 import random
-import fcntl
-import struct
 import os
 from abc import ABC, abstractmethod
 
-# _IOR('p', 1, int) definition for Linux ioctl
+# fcntl / struct 只在 Linux 可用（LKM 模式需要）
+try:
+    import fcntl
+    import struct
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
+# _IOR('p', 1, int) — Linux ioctl 命令號
 PICO_GET_RSSI = (2 << 30) | (4 << 16) | (112 << 8) | 1
+
 
 # 哨兵值：BLE thread 在偵測到 Pico 斷線時寫入此值
 # 遠超出正常 RSSI 範圍（-120 ~ -1 dBm），讓 GUI 明確判斷斷線
@@ -78,6 +85,8 @@ class BleSignalSource(SignalSource):
 
 class IoctlSignalSource(SignalSource):
     def __init__(self, device_path: str = "/dev/pico_tracker") -> None:
+        if not _HAS_FCNTL:
+            raise RuntimeError("IoctlSignalSource requires Linux (fcntl not available on this platform).")
         self.device_path = device_path
         if not os.path.exists(self.device_path):
             raise FileNotFoundError(f"Device {self.device_path} not found. Is the LKM loaded?")
