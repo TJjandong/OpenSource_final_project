@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# NOTE: fcntl / struct / os imports removed.
+# BLE scanning is now performed inside the Linux Kernel Module (pico_tracker.c)
+# via a kernel-space HCI socket. Python only reads RSSI via ioctl (IoctlSignalSource).
+
 import asyncio
 import random
 import fcntl
@@ -111,154 +115,16 @@ class IoctlSignalSource(SignalSource):
             raise RuntimeError(f"Failed to read from {self.device_path}: {e}") from e
 
 
-def start_lkm_writer_thread(target_uuid: str, device_path: str = "/dev/pico_tracker") -> None:
-    import threading
-    import struct
-    import time
-
-    # BLE thread 最後一次從 scan 收到合法 RSSI 的時間與值
-    last_rssi: list[int | None] = [None]
-    last_ble_update: list[float] = [0.0]
-
-    # 超過此秒數沒有 scan 輸出合法 RSSI，判定斷線，寫哨兵
-    DISCONNECT_TIMEOUT = 15.0
-
-    # 心跳：每 3 秒把最新值寫入 LKM，維持 buffer 新鮮
-    HEARTBEAT_INTERVAL = 3.0
-
-    # scan restart：每 8 秒重啟一次掃描，強制 bluetoothctl 重新輸出所有裝置的 RSSI
-    # bluetoothctl 在 RSSI 穩定時不會主動輸出，重啟可解決此問題
-    # 注意：不使用 bluetoothctl info，因為它讀的是系統快取（即使裝置已斷電仍有資料）
-    SCAN_RESTART_INTERVAL = 8.0
-
-    def _heartbeat():
-        """每 3 秒寫一次 LKM：
-        - scan 最近有更新（< DISCONNECT_TIMEOUT）→ 寫入最新 RSSI
-        - scan 長時間沉默 → 寫入哨兵值，GUI 顯示斷線
-        核心模組 buffer 讀完不清空，心跳覆蓋最新值即可。"""
-        while True:
-            time.sleep(HEARTBEAT_INTERVAL)
-            if last_rssi[0] is None:
-                continue  # 尚未收到任何合法 RSSI，不寫入
-
-            age = time.monotonic() - last_ble_update[0]
-            if age < DISCONNECT_TIMEOUT:
-                value = last_rssi[0]
-                label = f"RSSI {value} dBm (scan {age:.1f}s ago)"
-            else:
-                value = DISCONNECT_SENTINEL
-                label = f"SENTINEL (scan silent {age:.1f}s → disconnected)"
-
-            try:
-                with open(device_path, "wb") as f:
-                    f.write(struct.pack("<i", value))
-                print(f"[BLE Heartbeat] {label}", flush=True)
-            except Exception as e:
-                print(f"[BLE Heartbeat] Write failed: {e}", flush=True)
-
-    def _scan_restarter(process_stdin):
-        """每 8 秒重啟 bluetoothctl scan，強制重新輸出所有鄰近裝置的 RSSI。
-        不使用 bluetoothctl info（會讀快取舊資料，即使 Pico 已斷電）。"""
-        time.sleep(SCAN_RESTART_INTERVAL)  # 先等初始 scan 穩定
-        while True:
-            try:
-                process_stdin.write("scan off\n")
-                process_stdin.flush()
-                time.sleep(1.0)
-                process_stdin.write("scan on\n")
-                process_stdin.flush()
-                print("[BLE Scan] Restarted scan → fresh RSSI reports.", flush=True)
-            except Exception as e:
-                print(f"[BLE Scan] Restart failed: {e}", flush=True)
-                break
-            time.sleep(SCAN_RESTART_INTERVAL)
-
-    def _run_writer():
-        import subprocess
-        import re
-
-        print("[BLE Background] Starting bluetoothctl wrapper...", flush=True)
-
-        target_macs: set[str] = set()
-
-        try:
-            process = subprocess.Popen(
-                ['bluetoothctl'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-
-            # 查詢已記住的裝置，再開掃描
-            process.stdin.write("devices\n")
-            process.stdin.flush()
-            process.stdin.write("scan on\n")
-            process.stdin.flush()
-
-            # 啟動 scan restart thread
-            restart_t = threading.Thread(
-                target=_scan_restarter,
-                args=(process.stdin,),
-                daemon=True
-            )
-            restart_t.start()
-
-            devices_re = re.compile(r"Device ([0-9a-fA-F:]+) (.*)")
-            new_device_re = re.compile(r"\[(?:NEW|CHG)\] Device ([0-9a-fA-F:]+) (.*)")
-
-            while True:
-                line = process.stdout.readline()
-                if not line:
-                    break
-                line = line.strip()
-
-                # 從 'devices' 輸出找已記住的裝置
-                if line.startswith("Device"):
-                    m = devices_re.match(line)
-                    if m:
-                        mac, name = m.groups()
-                        if ("pico" in name.lower() or "tracker" in name.lower()) and mac not in target_macs:
-                            print(f"[BLE Background] Known target: {mac} ({name})", flush=True)
-                            target_macs.add(mac)
-
-                # 從掃描輸出找新裝置
-                nm = new_device_re.search(line)
-                if nm:
-                    mac, rest = nm.group(1), nm.group(2)
-                    if ("pico" in rest.lower() or "tracker" in rest.lower()) and mac not in target_macs:
-                        print(f"[BLE Background] Discovered: {mac} ({rest})", flush=True)
-                        target_macs.add(mac)
-
-                # 解析 RSSI（只接受來自真實廣播掃描的更新）
-                if "RSSI:" in line:
-                    parts = line.split()
-                    if len(parts) >= 4 and parts[1] == "Device":
-                        mac = parts[2]
-                        if mac in target_macs:
-                            if "(" in line and ")" in line:
-                                rssi_str = line.split("(")[-1].split(")")[0]
-                            else:
-                                rssi_str = line.split("RSSI:")[1].strip()
-                            try:
-                                rssi = int(rssi_str)
-                                if not _is_valid_rssi(rssi):
-                                    print(f"[BLE Background] Ignored invalid RSSI: {rssi} dBm", flush=True)
-                                    continue
-                                print(f"[BLE Background] Valid RSSI: {rssi} dBm for {mac}", flush=True)
-                                last_rssi[0] = rssi
-                                last_ble_update[0] = time.monotonic()
-                                with open(device_path, "wb") as f:
-                                    f.write(struct.pack("<i", rssi))
-                            except Exception as e:
-                                print(f"[BLE Background] Parse/write failed: {e}", flush=True)
-
-        except Exception as e:
-            print(f"[BLE Background] bluetoothctl wrapper failed: {e}", flush=True)
-
-    heartbeat_t = threading.Thread(target=_heartbeat, daemon=True)
-    heartbeat_t.start()
-
-    t = threading.Thread(target=_run_writer, daemon=True)
-    t.start()
+# ── start_lkm_writer_thread() 已移除 ──
+#
+# 原本此函式負責：
+#   1. 以 subprocess 啟動 bluetoothctl
+#   2. 解析 RSSI 輸出
+#   3. 將 RSSI 寫入 /dev/pico_tracker
+#
+# 現在這些工作全部由核心模組內的 BLE kthread 完成：
+#   - kernel_module/pico_tracker.c: ble_scan_thread_fn()
+#   - 透過 HCI kernel socket 直接控制 hci0
+#   - 不需要任何 User Space BLE 程式
+#
+# Python 只需用 IoctlSignalSource 透過 ioctl 讀取 RSSI 即可。

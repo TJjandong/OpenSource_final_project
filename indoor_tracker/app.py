@@ -198,12 +198,9 @@ def main() -> None:
     args = build_argument_parser().parse_args()
     settings = TrackerSettings()
     
-    # If running in LKM mode, start the background thread to automatically 
-    # scan for real Bluetooth data and push it into the Kernel Module.
-    if args.mode == "lkm":
-        from .sources import start_lkm_writer_thread
-        start_lkm_writer_thread(settings.target_uuid)
-        
+    # LKM 模式：BLE 掃描由 kernel module 的 ble_scan_thread_fn() kthread 負責，
+    # 不再需要 Python 啟動 bluetoothctl 或寫入 /dev/pico_tracker。
+    # Python 只透過 IoctlSignalSource.read() → ioctl(PICO_GET_RSSI) 讀資料。
     controller = TrackerController(settings, args.mode)
     app = SignalDashboard(controller)
     try:
